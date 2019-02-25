@@ -157,8 +157,14 @@ def process_dataset(tsv_filename, name, output_dir, num_examples_per_file, num_c
     coord.join([tsv_thread] + processor_threads + serializer_threads)
     print("All threads finished processing.")
 
+tf.logging.set_verbosity(tf.logging.INFO)
+tf.flags.DEFINE_string("training_tsv", "./Train_GCC-training.tsv", "Path to the Training TSV file.")
+tf.flags.DEFINE_string("validation_tsv", "./Validation_GCC-1.1.0-Validation.tsv", "Path to the Validation TSV file.")
+tf.flags.DEFINE_string("output_dir", "./", "Output data directory.")
+tf.flags.DEFINE_integer("num_examples_per_file", 5096, "Number of examples per each TFRecord file.")
+tf.flags.DEFINE_integer("num_cores", 8, "Number of cores to use when extracting the dataset.")
+FLAGS = tf.flags.FLAGS
+
 if __name__ == "__main__":
-    training_filename = "./Train_GCC-training.tsv"
-    process_dataset(training_filename, "train", "./", 5096, 8)
-    validation_filename = "./Validation_GCC-1.1.0-Validation.tsv"
-    process_dataset(validation_filename, "val", "./", 1024, 8)
+    process_dataset(FLAGS.training_tsv, "train", FLAGS.output_dir, FLAGS.num_examples_per_file, FLAGS.num_cores)
+    process_dataset(FLAGS.validation_tsv, "val", FLAGS.output_dir, FLAGS.num_examples_per_file, FLAGS.num_cores)
