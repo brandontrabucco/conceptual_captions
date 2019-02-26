@@ -41,11 +41,11 @@ def process_tsv(tsv_filename, starting_index, training_example_queue, max_queue_
                 while len(training_example_queue) >= max_queue_size:
                     time.sleep(.5)
                 training_example_queue.append(training_example)
-            except UnicodeDecodeError as e:
-                print("Skipping bad tsv row.")
-                continue
             except StopIteration as e:
                 break
+            except Exception as e:
+                print("Skipping bad tsv row.")
+                continue
     is_complete_flag[0] = True
     print("Finished reading the tsv file.")
 
@@ -64,12 +64,6 @@ def process_training_examples(training_example_queue, processed_queue, max_queue
         training_example = training_example_queue.pop(0)
         try:
             image_data = process_url(training_example.data)
-        except urllib.error.HTTPError as e:
-            print("Skipping bad training example, http address does not exist.")
-            continue
-        except urllib.error.URLError as e:
-            print("Skipping bad training example, http address does not exist.")
-            continue
         except Exception as e:
             print("Skipping bad training example.")
             continue
