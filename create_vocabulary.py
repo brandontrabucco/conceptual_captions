@@ -6,6 +6,7 @@ import tensorflow as tf
 import string
 import pickle as pkl
 import time
+from nltk.tokenize import wordpunct_tokenize as word_tokenize
 
 
 tf.logging.set_verbosity(tf.logging.INFO)
@@ -15,33 +16,8 @@ tf.flags.DEFINE_integer("min_instances", 5, "Minimum instances of word before tr
 FLAGS = tf.flags.FLAGS
 
 
-PUNCTUATION = string.punctuation
-UPPER = string.ascii_uppercase
-LOWER = string.ascii_lowercase
-DIGITS = string.digits
-
-
 def process_string(input_string):
-    stage_one = ""
-    for character in input_string:
-        if character in PUNCTUATION:
-            stage_one += " " + character + " "
-        if character in UPPER:
-            if len(stage_one) > 0 and stage_one[-1] in DIGITS:
-                stage_one += " "
-            stage_one += character.lower()
-        if character == " ":
-            stage_one += character
-        if character in LOWER:
-            if len(stage_one) > 0 and stage_one[-1] in DIGITS:
-                stage_one += " "
-            stage_one += character
-        if character in DIGITS:
-            if len(stage_one) > 0 and stage_one[-1] in LOWER:
-                stage_one += " "
-            stage_one += character
-    stage_two = stage_one.replace("  ", " ").replace("  ", " ").strip()
-    return stage_two.split(" ")
+    return word_tokenize(input_string.strip().lower())
 
 
 def get_unique_words(sentence_generator):

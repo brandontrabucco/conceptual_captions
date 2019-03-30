@@ -5,7 +5,6 @@ Serializes the conceptual captions dataset into tf records."""
 import tensorflow as tf
 import math
 import numpy as np
-import string
 import pickle as pkl
 import os
 import time
@@ -15,6 +14,7 @@ import threading
 import multiprocessing
 import FasterRCNN.inference
 from FasterRCNN.inference import create_r101fpn_mask_rcnn_model_graph as create_model
+from nltk.tokenize import wordpunct_tokenize as word_tokenize
 
 
 tf.logging.set_verbosity(tf.logging.INFO)
@@ -25,8 +25,7 @@ tf.flags.DEFINE_string("output_dir", "./train_mask_tfrecords/", "Output data dir
 tf.flags.DEFINE_integer("num_threads", 16, "Number of threads to use when serializing the dataset.")
 tf.flags.DEFINE_integer("num_examples_per_file", 5096, "Number of threads to use when serializing the dataset.")
 tf.flags.DEFINE_integer("queue_size", 64, "The number of examples to extract at once.")
-tf.flags.DEFINE_integer("image_height", 512, "The height of the image given to mask rcnn.")
-tf.flags.DEFINE_integer("image_width", 512, "The width of the image given to mask rcnn.")
+tf.flags.DEFINE_integer("image_size", 600, "The size of the image smaller dimension.")
 tf.flags.DEFINE_integer("start_at_file_index", 0, "The number of tfrecords to skip.")
 tf.flags.DEFINE_string("visible_gpus", "0,0,1", "Which GPU to use.")
 tf.flags.DEFINE_string("gpus_memory", "0.4,0.4,1", "Which GPU to use.")
@@ -34,7 +33,20 @@ FLAGS = tf.flags.FLAGS
 
 
 TrainingExample = collections.namedtuple("TrainingExample", (
-    "image_id", "image", "caption", "boxes", "masks", "labels"))
+    "image_id", "image", "caption", "boxes", "masks", "labels",
+    "r1", "r2", "r3", "r4", "m1", "m2", "m3", "m4"))
+
+
+def rescale_shorter_edge(images, new_shorter_edge):
+    def compute_longer_edge(height, width, new_shorter_edge):
+        return tf.cast(width * new_shorter_edge / height, tf.int32)
+    height, width = tf.shape(images)[0], tf.shape(images)[1]
+    height_smaller_than_width = tf.less_equal(height, width)
+    new_height_and_width = tf.cond(
+        height_smaller_than_width,
+        lambda: (new_shorter_edge, compute_longer_edge(height, width, new_shorter_edge)),
+        lambda: (compute_longer_edge(width, height, new_shorter_edge), new_shorter_edge))
+    return tf.image.resize_images(images, new_height_and_width)
 
 
 class Extractor(object):
@@ -63,6 +75,14 @@ class Extractor(object):
             self.boxes = self.fetch_dict["boxes"]
             self.labels = self.fetch_dict["labels"]
             self.masks = self.fetch_dict["masks"]
+            self.r1 = self.fetch_dict["region_features_1"]
+            self.r2 = self.fetch_dict["region_features_2"]
+            self.r3 = self.fetch_dict["region_features_3"]
+            self.r4 = self.fetch_dict["region_features_4"]
+            self.m1 = self.fetch_dict["mask_features_1"]
+            self.m2 = self.fetch_dict["mask_features_2"]
+            self.m3 = self.fetch_dict["mask_features_3"]
+            self.m4 = self.fetch_dict["mask_features_4"]
             # store a handle to how many images were extracted so far
             self.num_images_so_far = tf.Variable(0)
             self.increment_by_batch_size = tf.assign(self.num_images_so_far, self.num_images_so_far + batch_size)
@@ -83,8 +103,7 @@ class Extractor(object):
         def filename_to_tensor(image_filename):
             image_bytes = tf.py_func(lazy_load_image, [image_filename], tf.string)
             image_tensor = tf.image.decode_jpeg(image_bytes, channels=3)
-            return tf.image.resize_images(image_tensor, [
-                FLAGS.image_height, FLAGS.image_width])
+            return rescale_shorter_edge(image_tensor, FLAGS.image_size)
         # Convert each element to a tensor
         dataset = dataset.map(filename_to_tensor, num_parallel_calls=16)
         dataset = dataset.apply(tf.contrib.data.ignore_errors())
@@ -107,8 +126,12 @@ class Extractor(object):
         Returns: 
             a list of ImageMetadata objects."""
         position_before = self.get_num_extracted_so_far()
-        boxes, masks, labels, _ = self.sess.run([
-            self.boxes, self.masks, self.labels, self.increment_by_batch_size])
+        (boxes, masks, labels, 
+            r1, r2, r3, r4, m1, m2, m3, m4, _) = self.sess.run([
+            self.boxes, self.masks, self.labels, 
+            self.r1, self.r2, self.r3, self.r4,
+            self.m1, self.m2, self.m3, self.m4,
+            self.increment_by_batch_size])
         position_after = self.get_num_extracted_so_far()
         list_of_preextracted_images = []
         for i in range(position_after - position_before):
@@ -120,37 +143,15 @@ class Extractor(object):
                     caption=image_meta.caption,
                     boxes=boxes,
                     masks=masks,
-                    labels=labels))
+                    labels=labels,
+                    r1=r1, r2=r2, r3=r3, r4=r4, 
+                    m1=m1, m2=m2, m3=m3, m4=m4))
         return list_of_preextracted_images
 
 
-PUNCTUATION = string.punctuation
-UPPER = string.ascii_uppercase
-LOWER = string.ascii_lowercase
-DIGITS = string.digits
-
-
 def process_string(input_string, vocab):
-    stage_one = ""
-    for character in input_string:
-        if character in PUNCTUATION:
-            stage_one += " " + character + " "
-        if character in UPPER:
-            if len(stage_one) > 0 and stage_one[-1] in DIGITS:
-                stage_one += " "
-            stage_one += character.lower()
-        if character == " ":
-            stage_one += character
-        if character in LOWER:
-            if len(stage_one) > 0 and stage_one[-1] in DIGITS:
-                stage_one += " "
-            stage_one += character
-        if character in DIGITS:
-            if len(stage_one) > 0 and stage_one[-1] in LOWER:
-                stage_one += " "
-            stage_one += character
-    stage_two = stage_one.replace("  ", " ").replace("  ", " ").strip()
-    return [vocab[word] if word in vocab else vocab["<unk>"] for word in (["<s>"] + stage_two.split(" ") + ["</s>"])]
+    stage_two = word_tokenize(input_string.strip().lower())
+    return [vocab[word] if word in vocab else vocab["<unk>"] for word in (["<s>"] + stage_two + ["</s>"])]
 
 
 def get_all_training_examples(image_folder, tsv_filename):
@@ -161,26 +162,44 @@ def get_all_training_examples(image_folder, tsv_filename):
             training_examples.append(
                 TrainingExample(
                     i, os.path.join(image_folder, "{0}.jpg".format(i)), 
-                    line.strip().split("\t")[0], None, None, None))
+                    line.strip().split("\t")[0], None, None, None,
+                        None, None, None, None, None, None, None, None))
     end_time = time.time()
     print("Finished loading training examples, took {0} seconds.".format(end_time - start_time))
     return training_examples
 
 
-def to_sequence_example(image_id, data, caption, vocab, boxes, masks, labels):
+def to_sequence_example(metadata, image_bytes, vocab):
+    num_regions = metadata.boxes.shape[0]
     return tf.train.SequenceExample(
         context=tf.train.Features(feature={
-            "image/image_id": tf.train.Feature(int64_list=tf.train.Int64List(value=[image_id])),
-            "image/data": tf.train.Feature(bytes_list=tf.train.BytesList(value=[data])),
-            "image/boxes": tf.train.Feature(float_list=tf.train.FloatList(value=boxes.ravel())),
-            "image/boxes/shape": tf.train.Feature(int64_list=tf.train.Int64List(value=boxes.shape)),
-            "image/masks": tf.train.Feature(float_list=tf.train.FloatList(value=masks.ravel())),
-            "image/masks/shape": tf.train.Feature(int64_list=tf.train.Int64List(value=masks.shape)),
-            "image/labels": tf.train.Feature(int64_list=tf.train.Int64List(value=labels.ravel())),
-            "image/labels/shape": tf.train.Feature(int64_list=tf.train.Int64List(value=labels.shape)),
+            "image/image_id": tf.train.Feature(int64_list=tf.train.Int64List(value=[metadata.image_id])),
+            "image/data": tf.train.Feature(bytes_list=tf.train.BytesList(value=[image_bytes])),
         }), feature_lists=tf.train.FeatureLists(feature_list={
             "image/caption": tf.train.FeatureList(feature=[tf.train.Feature(int64_list=tf.train.Int64List(
-                value=[word])) for word in process_string(caption, vocab)])
+                value=[word])) for word in process_string(metadata.caption, vocab)]),
+            "image/labels": tf.train.FeatureList(feature=[tf.train.Feature(int64_list=tf.train.Int64List(
+                value=metadata.labels[i:(i + 1)].ravel())) for i in range(num_regions)]),
+            "image/boxes": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.boxes[i, :].ravel())) for i in range(num_regions)]),
+            "image/masks": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.masks[i, :, :].ravel())) for i in range(num_regions)]),
+            "image/r1": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.r1[i, :].ravel())) for i in range(num_regions)]),
+            "image/r2": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.r2[i, :].ravel())) for i in range(num_regions)]),
+            "image/r3": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.r3[i, :].ravel())) for i in range(num_regions)]),
+            "image/r4": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.r4[i, :].ravel())) for i in range(num_regions)]),
+            "image/m1": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.m1[i, :].ravel())) for i in range(num_regions)]),
+            "image/m2": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.m2[i, :].ravel())) for i in range(num_regions)]),
+            "image/m3": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.m3[i, :].ravel())) for i in range(num_regions)]),
+            "image/m4": tf.train.FeatureList(feature=[tf.train.Feature(float_list=tf.train.FloatList(
+                value=metadata.m4[i, :].ravel())) for i in range(num_regions)]),
         })).SerializeToString()
 
 
@@ -204,9 +223,7 @@ def write_all_training_examples(training_examples, vocab_filename, output_dir, n
                 continue
             with tf.gfile.FastGFile(x.image, "rb") as f:
                 image_bytes = f.read()
-            writer.write(to_sequence_example(
-                x.image_id, image_bytes, x.caption, vocab, 
-                x.boxes, x.masks, x.labels))
+            writer.write(to_sequence_example(x, image_bytes, vocab))
             num_examples_in_this_file += 1
         writer.close()
         sys.stdout.flush()
